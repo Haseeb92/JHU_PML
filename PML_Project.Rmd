@@ -1,0 +1,131 @@
+---
+title: "Predicting the class of physical exercise: PML Project Report"
+author: "Muhammad Haseeb Ahmad"
+date: "December 24, 2015"
+output:
+  html_document:
+    fig_caption: yes
+---
+```{r setoptions, echo=FALSE}
+library(knitr)
+opts_chunk$set(message=F, warning=F)
+```
+```{r echo=F}
+# NOTE: The models previously trained were saved on the disk so as to save time for future knits in R Markdown. 
+# This chunk loads the trained models. You may find the code used for training these models below in further chunks of code.
+load('../Project/fit1.RData'); load('../Project/fit2.RData')
+load('../Project/fit3.RData')
+```
+
+## Executive Summary
+A stochastic gradient boosting machine was constructed for predicting 'classe' variable of the fitness dataset. Three different models were built, tweaking different tuning parameters each time, on the training dataset with 4-fold cross-validation. 'Accuracy' was set as the metric for error rate. The model that performed best on cross-validation was used to make predictions on the test set to estimate out-of-sample error. The estimated out-of-sample accuracy was over 99%. 'Caret' package was used to train this model.
+
+## Data Processing
+We load the required packages:
+```{r}
+library(caret)
+library(dplyr)
+```
+
+#### Loading data
+The dataset is first loaded into a dataframe. Next, all cells that are left empty in the dataset are converted to `NA` for easy handling later on.
+
+We also notice from a glimpse of the data that several of the columns contain very few valid entries. Valid entries are considered to be those that are not `NA` or empty. We set a benchmark proportion which would require 20% of the total column entries to be valid for a variable to be considered significant in our learning algorithm. We also remove id columns: ID columns are those deemed to uniquely identify an entry in the dataset, in our case they were: *'X', 'user_name'* and *'cvtd_timestamp'*.
+We set aside 70% of the rows for training the machine and the remainder as testing set to make an estimate for the out-of-sample error.
+```{r}
+data <- read.csv('./pml-training.csv')
+data[data == ''] <- NA
+maxBadCases = 0.2; trainProp = 0.7
+
+# Select the same columns for the testing set
+invalidCols <- (colSums(is.na(data)) > maxBadCases*nrow(data))
+validData <- data[,!invalidCols] %>% select(-X, -user_name, -cvtd_timestamp)
+features <- colnames(validData)
+
+set.seed(1)
+trainIndex <- createDataPartition(data$classe, p = trainProp, list = F)
+trainData <- validData[trainIndex,]
+testData <- validData[-trainIndex,]
+```
+
+####Pre-processing
+Some of the column entries were deemed to be too large relative to others, so, a preprocessing object was defined on the training set to scale and center the data.
+This object was then used to adjust the data entries for the training and test sets.
+```{r}
+preObj <- preProcess(trainData, method = c('center', 'scale'))
+trainData <- predict(preObj, trainData)
+testData <- predict(preObj, testData)
+```
+
+## Model Training
+A `trainControl` object was defined for the cross-validation strategy of our learning algorithm. We decided on k-fold cross validation with k = 4.
+A grid was defined for the tuning parameters of each model. Each model was trained with *'classe'* as the outcome and all the remaining variables as *predictors*.
+```{r}
+cvControl <- trainControl(method = 'repeatedcv', number = 4)
+```
+
+### Model 1
+Model 1 was trained with the tree-stump strategy. It was tuned for upto 280 boosts with the shrinkage tuned for 0.01 and 0.1. Shrinkage is the factor by which each successive boost is reduced. Higher shrinkage, i.e. a lower value for the `shrinkage` parameter, leads to higher bias, lower variance. This may lead to better performance on the cross-validation sets in some instances.
+Minimum terminal node size given by `n.minobsinnode` is fixed: it is the minimum number of training examples that each final leaf of the tree is allowed to have. The extreme case is where each leaf corresponds to one training data case.
+```{r eval=F}
+tuningParams <- expand.grid(interaction.depth = 1, n.trees = (1:4)*70, 
+                            shrinkage = c(0.01, 0.1), 
+                            n.minobsinnode = 20)
+
+fit1 <- train(classe ~ ., data = trainData, 
+              method = 'gbm', tuneGrid = tuningParams, trControl = cvControl)
+
+```
+
+Here is a plot for the performance of model 1 on cross-validation sets based on the cross-validation strategy defined earlier. Accuracy was considered synonymous to cross-validation error rate.
+```{r fig.align='center', fig.cap='Accuracy of model 1.'}
+ggplot.train(fit1)
+```
+It is seen above that shrinkage value of 0.1 outperforms that of 0.01 on the cross-validation sets. So we fix shrinkage at 0.1 for the next models.
+
+### Model 2
+Model 2 was again trained with the tree-stump strategy. It was tuned for upto 300 boosts with the shrinkage fixed at 0.1. Number of boosts given by `n.trees` can sometimes improve performance on cross-validation sets.
+```{r eval=F}
+tuningParams2 <- expand.grid(interaction.depth = 1, n.trees = (25:30)*10,
+                             shrinkage = 0.1, n.minobsinnode = 20)
+fit2 <- train(classe ~ ., data = trainData, method = 'gbm', 
+              tuneGrid = tuningParams2, trControl = cvControl)
+```
+Here is a plot for the performance of model 2 on the cross-validation sets:
+```{r fig.align='center', fig.cap='Accuracy of model 2.'}
+ggplot.train(fit2)
+```
+You may see above that there is only a minute change in performance from 250 to 300 boosts. It appears that we have about maxed-out what we can achieve with the number of boosts. From here on we will focus on interaction depth.
+
+### Model 3
+Here we test three different tree-depths given by `interaction.depth`: it refers to the number of branches that a node can have.
+```{r, eval=F}
+tuningParams3 <- expand.grid(interaction.depth = c(5, 7, 10), n.trees = (1:3)*10,
+                             shrinkage = 0.1, n.minobsinnode = 20)
+fit3 <- train(classe ~ ., data = trainData, method = 'gbm', 
+              tuneGrid = tuningParams3, trControl = cvControl)
+```
+Plotting for model 3's performance on cross-validation set:
+```{r fig.align='center', fig.cap='Accuracy of model 3.'}
+ggplot.train(fit3)
+```
+We observe that the accuracy has gone beyond 99% on cross-validation sets, and we take fit3 with optimal tunes of interaction depth = 10 and boosts = 30 as our final model.
+
+## Estimated out-of-sample error
+Below is a matrix of performance measures of our model on the test set. It can be deemed synonymous to out of sample error since we did not use this data while constructing our model.
+```{r}
+c <- confusionMatrix(testData$classe, predict(fit3, testData))
+print(c)
+```
+
+## Conclusion
+A gbm with interaction depth = 10 and no. of boosts = 30 gave accuracy of over `r floor(c$overall[1]*100)`% on our test-set.
+
+Some key tuning parameters were varied including number of boosts, interaction depth and shrinkage to get the optimal tune of the model.
+
+Another approach using neural networks or support vector machines may also achieve this, but in our case, further attempts using those algorithms would be redundant.
+```{r eval=F}
+save(fit1, file = './fit1.RData'); save(fit2, file = './fit2.RData')
+save(fit3, file = './fit3.RData')
+```
+We save our models for quick access in the future.
